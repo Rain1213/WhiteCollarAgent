@@ -1,0 +1,42 @@
+name: craft-agent-lite
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - requests
+  - pyyaml
+  - loguru
+  - nest-asyncio
+  - pymongo
+  - tzlocal
+  - pillow
+  - pytesseract
+  - tesseract
+  - aiohttp
+  - beautifulsoup4
+  - chardet
+  - lxml
+  - scikit-learn
+  - pip:
+      - openai>=1.0.0
+      - google-generativeai>=0.6.0
+      - chromadb
+      - tiktoken
+      - langgraph
+      - neo4j
+      - mss
+      - httpx
+      - trafilatura
+      - markdown2
+      - python-docx
+      - fake-useragent
+      - fpdf2
+      - googlesearch-python
+      - pyautogui
+      - pygetwindow
+      - python3-xlib
+      - tenacity
+      - docling
+      - textual>=0.58.0

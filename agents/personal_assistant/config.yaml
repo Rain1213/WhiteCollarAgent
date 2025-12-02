@@ -1,0 +1,6 @@
+data_dir: core/data
+rag_dir: rag_docs
+rag_namespace: personal_assistant_knowledge
+
+model: gpt-4o
+max_tokens: 16000

@@ -1,0 +1,401 @@
+# -*- coding: utf-8 -*-
+"""
+core.agent_base
+
+Generic, extensible agent that powers every role-specific AI worker.
+This is a vanilla “base agent”, can be launched by instantiating **AgentBase**
+with default arguments; specialised agents simply subclass and override
+or extend the protected hooks.
+
+White Collar Agent is an open-sorce, light version of AI agent developed by CraftOS.
+Here are the core features:
+- Planning (Managed in text file)
+- Single thread (multi-tasking not supported)
+- Single tenant (support only one user)
+- Not proactive (cannot initiate task)
+- Can switch between CLI/GUI mode
+- Contain task document for few-shot examples
+
+Main agent cycle:
+- Receive query from user
+- Reply or create task
+- Task cycle:
+    - Planning
+    - Action
+    - Repeat until completion
+"""
+
+from __future__ import annotations
+
+import traceback
+import time
+import uuid
+from typing import Dict
+
+from core.action.action_library import ActionLibrary
+from core.action.action_manager import ActionManager
+from core.action.action_router import ActionRouter
+from core.tui_interface import TUIInterface
+from core.internal_action_interface import InternalActionInterface
+from core.llm_interface import LLMInterface
+from core.vlm_interface import VLMInterface
+from core.database_interface import DatabaseInterface
+from core.logger import logger
+from core.context_engine import ContextEngine
+from core.state_manager import StateManager, StateSession
+from core.trigger import Trigger, TriggerQueue
+
+from core.task.task_manager import TaskManager
+from core.task.task_planner import TaskPlanner
+from core.event_stream.event_stream_manager import EventStreamManager
+
+
+class AgentBase:
+    """
+    Foundation class for all agents.
+
+    Sub-classes typically override **one or more** of the following:
+
+    * `_load_extra_system_prompt`     → inject role-specific prompt fragment
+    * `_register_extra_actions`       → register additional tools
+    * `_build_db_interface`           → point to another Mongo/Chroma DB
+    """
+    def __init__(
+        self,
+        *,
+        data_dir: str = "core/data",
+        chroma_path: str = "./chroma_db",
+    ) -> None:
+        # persistence & memory
+        self.db_interface = self._build_db_interface(
+            data_dir = data_dir, chroma_path=chroma_path
+        )
+
+        # LLM + prompt plumbing
+        self.llm = LLMInterface(provider='byteplus', db_interface=self.db_interface)
+        self.vlm = VLMInterface()
+        self.context_engine = ContextEngine()
+        self.context_engine.set_role_info_hook(self._generate_role_info_prompt)
+
+        self.event_stream_manager = EventStreamManager(self.llm)
+        
+        # action & task layers
+        self.action_library = ActionLibrary(self.llm, db_interface=self.db_interface)
+        self.action_library.sync_databases()  # base tools
+        self._register_extra_actions()        # role-specific tools
+        
+        self.task_docs_path = "core/data/task_document"
+        if self.task_docs_path:
+            try:
+                stats = self.db_interface.ingest_task_documents_from_folder(self.task_docs_path)
+                logger.debug(f"[TASKDOC SYNC] folder={self.task_docs_path} → {stats}")
+            except Exception:
+                logger.error("[TASKDOC SYNC] Failed to ingest task documents", exc_info=True)
+
+        self.triggers = TriggerQueue(llm=self.llm)
+
+        # global state
+        self.state_manager = StateManager(
+            self.event_stream_manager,
+            vlm_interface=self.vlm,
+        )
+
+        self.action_manager = ActionManager(
+            self.action_library, self.llm, self.db_interface, self.event_stream_manager, self.context_engine, self.state_manager
+        )
+        self.action_router = ActionRouter(self.action_library, self.llm, self.context_engine)
+
+        self.task_planner = TaskPlanner(llm_interface=self.llm, db_interface=self.db_interface, fewshot_top_k=1, context_engine=self.context_engine)
+        self.task_manager = TaskManager(
+            self.task_planner,
+            self.triggers,
+            db_interface=self.db_interface,
+            event_stream_manager=self.event_stream_manager,
+        )
+
+        self.task_manager.attach_state_manager(self.state_manager)
+        InternalActionInterface.initialize(
+            self.llm,
+            self.task_manager,
+            self.state_manager,
+            vlm_interface=self.vlm,
+        )
+
+        # ── misc ──
+        self.is_running: bool = True
+        self._extra_system_prompt: str = self._load_extra_system_prompt()
+
+    # ─────────────────────────── agent “turn” ────────────────────────────
+    async def react(self, trigger: Trigger) -> None:
+        """Execute one agent turn responding to *trigger* in a resilient manner."""
+        session_id = trigger.session_id
+        new_session_id = None
+        action_output = {}  # ensure safe reference in error paths
+
+        try:
+            logger.debug("[REACT] starting...")
+
+            query = trigger.next_action_description
+            gui_mode = trigger.payload.get("gui_mode")
+            parent_id = trigger.payload.get("parent_action_id")
+
+            await self.state_manager.start_session(session_id, gui_mode)
+
+            # Compose messages
+            sys_msg, usr_msg = self._compose_prompt(query)
+
+            # Retrieve state session
+            state_session = StateSession.get()
+            logger.debug(f"[GUI MODE FLAG] {gui_mode}")
+            logger.debug(f"[GUI MODE FLAG - state] {state_session.gui_mode}")
+
+            # GUI-mode handling
+            if state_session.gui_mode:
+                logger.debug("[GUI MODE] Entered GUI mode.")
+                screen_md = self.state_manager.get_screen_state()
+
+                if self.event_stream_manager:
+                    self.event_stream_manager.log(
+                        session_id,
+                        "screen",
+                        screen_md,
+                        display_message="Screen summary updated",
+                    )
+
+                self.state_manager.bump_event_stream(session_id)
+
+            logger.debug(f"[AGENT QUERY] {query}")
+            logger.debug("[REACT] selecting action")
+
+            # Decide whether we are in task mode
+            is_running_task = self.state_manager.is_running_task()
+
+            if is_running_task:
+                action_decision = await self.action_router.select_action_in_task(
+                    query, context=query
+                )
+            else:
+                action_decision = await self.action_router.select_action(
+                    query, context=query
+                )
+
+            if not action_decision:
+                raise ValueError("Action router returned no decision.")
+
+            action_name = action_decision.get("action_name")
+            action_params = action_decision.get("parameters", {})
+
+            if not action_name:
+                raise ValueError("No valid action selected by the router.")
+
+            # Retrieve action
+            action = self.action_library.retrieve_action(action_name)
+            if action is None:
+                raise ValueError(
+                    f"Action '{action_name}' not found in the library. "
+                    "Check DB connectivity or ensure the action is registered."
+                )
+
+            # Determine parent action
+            if not parent_id and is_running_task:
+                current_step = self.state_manager.get_current_step(session_id)
+                if current_step and current_step.get("action_id"):
+                    parent_id = current_step["action_id"]
+
+            parent_id = parent_id or None  # enforce None at root
+
+            logger.debug(f"[PARENT ACTION ID] {parent_id}")
+
+            # Execute action
+            try:
+                action_output = await self.action_manager.execute_action(
+                    action,
+                    query,
+                    state_session.event_stream,
+                    parent_id=parent_id,
+                    session_id=session_id,
+                    is_running_task=is_running_task,
+                    input_data=action_params,
+                )
+            except Exception as e:
+                logger.error(f"[REACT ERROR] executing action '{action_name}': {e}", exc_info=True)
+                raise
+
+            # Follow-up handling
+            new_session_id = action_output.get("task_id") or session_id
+
+            self.state_manager.bump_event_stream(new_session_id)
+
+            # Schedule next trigger if continuing a task
+            await self.create_new_trigger(new_session_id, action_output, state_session)
+
+        except Exception as e:
+            # log error without raising again
+            tb = traceback.format_exc()
+            logger.error(f"[REACT ERROR] {e}\n{tb}")
+
+            try:
+                session_to_use = new_session_id or session_id
+                if session_to_use and self.event_stream_manager:
+                    logger.debug("[REACT ERROR] logging to event stream")
+
+                    self.event_stream_manager.log(
+                        session_to_use,
+                        "error",
+                        f"[REACT] {type(e).__name__}: {e}\n{tb}",
+                        display_message=None,
+                    )
+
+                    logger.debug("[AGENT BASE] Action failed")
+
+                    self.state_manager.bump_event_stream(session_to_use)
+
+                    logger.debug("[AGENT BASE] Action failed and then bumped")
+                    logger.debug(f"[AGENT BASE] Action Output: {action_output}")
+
+                    # Schedule fallback follow-up only if action_output exists
+                    logger.debug("[AGENT BASE] Failed action so create new trigger")
+                    await self.create_new_trigger(session_to_use, action_output, state_session)
+
+            except Exception:
+                logger.error("[REACT ERROR] Failed to log to event stream or create trigger", exc_info=True)
+
+        finally:
+            # Always end session safely
+            try:
+                self.state_manager.end_session()
+            except Exception:
+                logger.warning("[REACT] Failed to end session safely")
+
+
+    # ───────────────────── helpers used by handlers/commands ──────────────
+
+    async def create_new_trigger(self, new_session_id, action_output, state_session):
+        """
+        Schedule the next trigger if a task is running.
+        Fully wrapped in try/except so errors do not break the main REACT loop.
+        """
+        try:
+            if not self.state_manager.is_running_task():
+                # Nothing to schedule if no task is running
+                return
+
+            # Resolve current step for parent action ID
+            parent_action_id = None
+            try:
+                current_step = self.state_manager.get_current_step(new_session_id)
+                if current_step:
+                    parent_action_id = current_step.get("action_id")
+            except Exception as e:
+                logger.error(f"[TRIGGER] Failed to get current step for session {new_session_id}: {e}", exc_info=True)
+
+            # Delay logic
+            fire_at_delay = 0.0
+            try:
+                fire_at_delay = float(action_output.get("fire_at_delay", 0.0))
+            except Exception:
+                logger.error("[TRIGGER] Invalid fire_at_delay in action_output. Using 0.0", exc_info=True)
+
+            fire_at = time.time() + fire_at_delay
+
+            logger.debug(f"[TRIGGER] Creating new trigger for session: {new_session_id}")
+
+            # Build and enqueue trigger safely
+            try:
+                await self.triggers.put(
+                    Trigger(
+                        fire_at=fire_at,
+                        priority=5,
+                        next_action_description="Perform the next best action for the task based on the plan and event stream",
+                        session_id=new_session_id,
+                        payload={
+                            "parent_action_id": parent_action_id,
+                            "gui_mode": state_session.gui_mode,
+                        },
+                    )
+                )
+            except Exception as e:
+                logger.error(f"[TRIGGER] Failed to enqueue trigger for session {new_session_id}: {e}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"[TRIGGER] Unexpected error in create_new_trigger: {e}", exc_info=True)
+
+    async def _handle_chat_message(self, payload: Dict):
+        try:
+            user_input: str = payload.get("text", "")
+            if not user_input:
+                logger.warning("Received empty message.")
+                return
+
+            chat_content = user_input
+            logger.info(f"[CHAT RECEIVED] {chat_content}")
+            gui_mode = payload.get("gui_mode")
+            await self.state_manager.start_session("", gui_mode)
+
+            self.state_manager.record_user_message(chat_content)
+
+            await self.triggers.put(
+                Trigger(
+                    fire_at=time.time(),
+                    priority=1,
+                    next_action_description=(
+                        "Please perform action that best suit this user chat "
+                        f"you just received: {chat_content}"
+                    ),
+                    session_id="chat",
+                    payload={"gui_mode": gui_mode},
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Error handling incoming message: {e}", exc_info=True)
+
+    # ────────────────────────────── hooks ────────────────────────────────
+
+    def _load_extra_system_prompt(self) -> str:
+        """
+        Sub-classes may override to return a *role-specific* system-prompt
+        fragment that is **prepended** to the standard one.
+        """
+        return ""
+
+    def _register_extra_actions(self) -> None:
+        """
+        Sub-classes override to register additional Action objects,
+        e.g.::
+
+            from .actions import email_campaign
+            self.action_library.register_module(email_campaign)
+        """
+        return
+    
+    def _generate_role_info_prompt(self) -> str:
+        """
+        Subclasses override this to return role-specific system instructions
+        (responsibilities, behaviour constraints, expected domain tasks, etc).
+        """
+        return ""
+
+    def _build_db_interface(self, *, data_dir: str, chroma_path: str):
+        """A tiny wrapper so a subclass can point to another DB/collection."""
+        return DatabaseInterface(
+            data_dir = data_dir, chroma_path=chroma_path
+        )
+
+    # ────────────────────────── internals ────────────────────────────────
+
+    def _compose_prompt(self, user_query: str):
+        """
+        Helper that merges *extra_system_prompt* (if any) with the normal
+        prompt created by ContextEngine.
+        """
+        sys_msg, usr_msg = self.context_engine.make_prompt(user_query)
+        if self._extra_system_prompt:
+            sys_msg = f"{self._extra_system_prompt.strip()}\n\n{sys_msg}"
+        return sys_msg, usr_msg
+
+    # ─────────────────────────── lifecycle ──────────────────────────────
+    async def run(self) -> None:
+        """Launch the interactive CLI loop."""
+        cli = TUIInterface(self)
+        await cli.start()

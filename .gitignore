@@ -1,0 +1,16 @@
+.null-ls*
+apps/controlpanel/.vs/
+apps/chatserver/uploads/
+chroma_db_actions/
+chroma_db_taskdocs/
+core/chroma_db_actions/
+**/logs/
+workspace/
+white_collar_agent/external_tools/
+white_collar_agent/generated_task_document/
+**/__pycache__/
+ollama_data/
+node_modules
+.env
+**/agent_logs.txt
+**/memory.txt

@@ -1,0 +1,413 @@
+# -*- coding: utf-8 -*-
+"""
+core.llm_interface
+
+All LLM calls have to go through this interface
+Currently support llm call to open ai api, google gemini, and remote call to Ollama
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+import requests
+
+
+from openai import OpenAI
+
+from core.google_gemini_client import GeminiAPIError, GeminiClient
+from decorators import profiler, profile, log_events
+
+# Logging setup — fall back to a basic logger if the project‑level logger
+# is not available (e.g. when running this file standalone).
+try:
+    from core.logger import logger  # type: ignore
+except Exception:  # pragma: no cover
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+
+class LLMInterface:
+    """Simple wrapper to interact with multiple Large-Language-Model back-ends.
+
+    Supported providers
+    -------------------
+    * ``openai``  – OpenAI Chat Completions API
+    * ``remote``  – Local Ollama HTTP endpoint (``/api/generate``)
+    * ``gemini``  – Google Generative AI (Gemini) API
+    * ``byteplus`` – BytePlus ModelArk Chat Completions API
+    """
+
+    _CODE_BLOCK_RE = re.compile(r"^```(?:\w+)?\s*|\s*```$", re.MULTILINE)
+
+    def __init__(
+        self,
+        *,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        db_interface: Optional[Any] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 8000,
+        ollama_url: str = "http://localhost:11434/api/generate",
+    ) -> None:
+        """Create a new :class:`LLMInterface`.
+
+        Parameters
+        ----------
+        provider:
+            ``"openai"``, ``"remote"`` or ``"gemini"``. Overrides DB-stored value.
+        model:
+            Model identifier for the selected provider (e.g. ``"gpt-4o"`` or
+            ``"gemini-pro"``). Overrides DB-stored value.
+        temperature:
+            Sampling temperature.
+        max_tokens:
+            Maximum tokens in the completion (only honoured by OpenAI and Gemini).
+        db_interface:
+            Optional persistence layer implementing ``log_prompt``.
+        ollama_url:
+            Base URL for the Ollama HTTP API.
+        """
+        self.db_interface = db_interface
+        self.ollama_url   = ollama_url.rstrip("/") + "/api/generate" if "/api/" not in ollama_url else ollama_url
+        self.temperature  = temperature
+        self.max_tokens   = max_tokens
+        self._gemini_client: GeminiClient | None = None
+        
+        INFO_KEY = "singleton"
+        self._info_key = INFO_KEY
+        info = (db_interface.get_agent_info(INFO_KEY) if db_interface else {}) or {}
+        
+        # Prioritize direct arguments, then DB info.
+        self.provider = provider 
+        # 'gemini' #provider or info.get("provider")
+        
+        # Set a sensible default model based on the provider
+        default_model = "gemini-2.5-flash"
+        if self.provider == "gemini":
+            default_model = "gemini-2.5-flash"
+        elif self.provider == "remote":
+            default_model = "llama3"
+        elif self.provider == "byteplus":
+            default_model = "kimi-k2-250711"
+            
+        self.model = model or info.get("model", default_model)
+
+        if self.provider == "openai":
+            self.api_key = os.getenv("OPENAI_API_KEY")
+            if not self.api_key or not self.api_key.strip():
+                raise EnvironmentError("OPENAI_API_KEY environment variable is not set.")
+            self.client = OpenAI(api_key=self.api_key)
+
+        elif self.provider == "remote":
+            # No additional initialisation required for Ollama.
+            pass
+
+        elif self.provider == "gemini":
+            self.api_key = os.getenv("GOOGLE_API_KEY")
+            if not self.api_key or not self.api_key.strip():
+                raise EnvironmentError("GOOGLE_API_KEY environment variable is not set.")
+            self._gemini_client = GeminiClient(self.api_key)
+        elif self.provider == "byteplus":
+            # BytePlus ModelArk API (OpenAI-compatible protocol)
+            # https://ark.ap-southeast.bytepluses.com/api/v3
+            self.api_key = os.getenv("BYTEPLUS_API_KEY")  # optional fallback name
+            
+            if not self.api_key or not self.api_key.strip():
+                raise EnvironmentError("BYTEPLUS_API_KEY is not set.")
+            # Allow override; default is AP Southeast per docs.
+            self.byteplus_base_url = os.getenv(
+                "BYTEPLUS_BASE_URL",
+                "https://ark.ap-southeast.bytepluses.com/api/v3"
+            )
+        else:
+            raise ValueError("Unsupported provider. Use 'openai', 'remote', or 'gemini'.")
+
+    # ───────────────────────────  Public helpers  ────────────────────────────
+    def _generate_response_sync(
+        self,
+        system_prompt: Optional[str] = None,
+        user_prompt: Optional[str] = None,
+    ) -> str:
+        """Synchronous implementation shared by sync/async entry points."""
+        if user_prompt is None:
+            raise ValueError("`user_prompt` cannot be None.")
+
+        logger.info(f"[LLM SEND] system={system_prompt} | user={user_prompt}")
+
+        if self.provider == "openai":
+            content = self._generate_openai(system_prompt, user_prompt)
+        elif self.provider == "remote":
+            content = self._generate_ollama(system_prompt, user_prompt)
+        elif self.provider == "gemini":
+            content = self._generate_gemini(system_prompt, user_prompt)
+        elif self.provider == "byteplus":
+            content = self._generate_byteplus(system_prompt, user_prompt)
+        else:  # pragma: no cover
+            raise RuntimeError(f"Unknown provider {self.provider!r}")
+
+        cleaned = re.sub(self._CODE_BLOCK_RE, "", (content or "").strip())
+        logger.info(f"[LLM RECV] {cleaned}")
+        return cleaned
+
+    # @log_events(name="generate_response")
+    # @profile("llm_generate_response")
+    def generate_response(
+        self,
+        system_prompt: Optional[str] = None,
+        user_prompt: Optional[str] = None,
+    ) -> str:
+        """Generate a single response from the configured provider."""
+        return self._generate_response_sync(system_prompt, user_prompt)
+
+    async def generate_response_async(
+        self,
+        system_prompt: Optional[str] = None,
+        user_prompt: Optional[str] = None,
+    ) -> str:
+        """Async wrapper that defers the blocking call to a worker thread."""
+        return await asyncio.to_thread(
+            self._generate_response_sync,
+            system_prompt,
+            user_prompt,
+        )
+
+    # ───────────────────── Provider‑specific private helpers ─────────────────────
+    @log_events(name="_generate_ollama")
+    @profile("llm_openai_call")
+    def _generate_openai(self, system_prompt: str | None, user_prompt: str) -> str:
+        token_count_input = token_count_output = 0
+        status = "failed"
+        content: Optional[str] = None
+        exc_obj: Optional[Exception] = None
+        
+        try:
+            messages: List[Dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
+            content = response.choices[0].message.content.strip()
+            token_count_input = response.usage.prompt_tokens
+            token_count_output = response.usage.completion_tokens
+            status = "success"
+        except Exception as exc: 
+            exc_obj = exc
+            logger.error(f"Error calling OpenAI API: {exc}")
+
+        self._log_to_db(
+            system_prompt,
+            user_prompt,
+            content if content is not None else str(exc_obj),
+            status,
+            token_count_input,
+            token_count_output,
+        )
+        return content or ""
+
+    @log_events(name="_generate_ollama")
+    @profile("llm_ollama_call")
+    def _generate_ollama(self, system_prompt: str | None, user_prompt: str) -> str:
+        token_count_input = token_count_output = 0
+        status = "failed"
+        content: Optional[str] = None
+        exc_obj: Optional[Exception] = None
+
+        try:
+            payload = {
+                "model": self.model,
+                "system": system_prompt,
+                "prompt": user_prompt,
+                "stream": False,
+                "options": {
+                    "temperature": self.temperature,
+                }
+            }
+            response = requests.post(self.ollama_url, json=payload, timeout=120)
+            response.raise_for_status()
+            result = response.json()
+
+            content = result.get("response", "").strip()
+            token_count_input = result.get("prompt_eval_count", 0)
+            token_count_output = result.get("eval_count", 0)
+            status = "success"
+        except Exception as exc:  
+            exc_obj = exc
+            logger.error(f"Error calling Ollama API: {exc}")
+
+        self._log_to_db(
+            system_prompt,
+            user_prompt,
+            content if content is not None else str(exc_obj),
+            status,
+            token_count_input,
+            token_count_output,
+        )
+        return content or ""
+
+    @log_events(name="_generate_gemini")
+    @profile("llm_gemini_call")
+    def _generate_gemini(self, system_prompt: str | None, user_prompt: str) -> str:
+        token_count_input = token_count_output = 0  # Not returned by the Gemini SDK
+        status = "failed"
+        content: Optional[str] = None
+        exc_obj: Optional[Exception] = None
+    
+        try:
+            if not self._gemini_client:
+                raise RuntimeError("Gemini client was not initialised.")
+
+            content = self._gemini_client.generate_text(
+                self.model,
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                temperature=self.temperature,
+                max_output_tokens=self.max_tokens,
+            )
+            status = "success"
+        except GeminiAPIError as exc:  # pragma: no cover
+            exc_obj = exc
+            logger.error(f"Gemini API rejected the prompt: {exc}")
+        except Exception as exc:  # pragma: no cover
+            exc_obj = exc
+            logger.error(f"Error calling Gemini API: {exc}")
+    
+        self._log_to_db(
+            system_prompt,
+            user_prompt,
+            content if content is not None else str(exc_obj),
+            status,
+            token_count_input,
+            token_count_output,
+        )
+        return content or ""
+
+    @log_events(name="_generate_byteplus")
+    @profile("llm_byteplus_call")
+    def _generate_byteplus(self, system_prompt: str | None, user_prompt: str) -> str:
+        token_count_input = token_count_output = 0
+        status = "failed"
+        content: Optional[str] = None
+        exc_obj: Optional[Exception] = None
+
+        try:
+            # Build OpenAI-compatible messages array
+            messages: List[Dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+
+            url = f"{self.byteplus_base_url.rstrip('/')}/chat/completions"
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                # Wire through sampling + output control
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                # "stream": False,  # default is non-streaming
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            }
+
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            response.raise_for_status()
+            result = response.json()
+
+            # Non-streaming content location (OpenAI-compatible)
+            choices = result.get("choices", [])
+            if choices:
+                # choices[0].message.content is the OpenAI-compatible field
+                content = (
+                    choices[0].get("message", {}).get("content")
+                    or choices[0].get("delta", {}).get("content", "")
+                    or ""
+                ).strip()
+
+            # Token usage (prompt/completion/total)
+            usage = result.get("usage") or {}
+            token_count_input = int(usage.get("prompt_tokens", 0))
+            token_count_output = int(usage.get("completion_tokens", 0))
+            status = "success"
+
+        except Exception as exc:  # pragma: no cover
+            exc_obj = exc
+            logger.error(f"Error calling BytePlus API: {exc}")
+
+        self._log_to_db(
+            system_prompt,
+            user_prompt,
+            content if content is not None else str(exc_obj),
+            status,
+            token_count_input,
+            token_count_output,
+        )
+        return content or ""
+
+    # ─────────────────── Internal utilities ───────────────────
+    @log_events(name="_log_to_db")
+    @profile("_log_to_db")
+    def _log_to_db(
+        self,
+        system_prompt: str | None,
+        user_prompt: str,
+        output: str,
+        status: str,
+        token_count_input: int,
+        token_count_output: int,
+    ) -> None:
+        """Persist prompt/response metadata using the optional `db_interface`."""
+        if not self.db_interface:
+            return
+
+        input_data: Dict[str, Optional[str]] = {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        }
+        config: Dict[str, Any] = {
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+        self.db_interface.log_prompt(
+            input_data=input_data,
+            output=output,
+            provider=self.provider,
+            model=self.model,
+            config=config,
+            status=status,
+            token_count_input=token_count_input,
+            token_count_output=token_count_output,
+        )
+
+    # ─────────────────── CLI helper for ad‑hoc testing ───────────────────
+    def _cli(self) -> None:  # pragma: no cover
+        """Run a quick interactive shell for manual testing."""
+        logger.debug(
+            "Provider: {provider!r}, model: {model!r}",
+            provider=self.provider,
+            model=self.model,
+        )
+        while True:
+            user_prompt = input("\nEnter prompt (or 'exit'): ").strip()
+            if user_prompt.lower() in {"exit", "quit"}:
+                break
+            response = self.generate_response(user_prompt=user_prompt)
+            logger.debug(f"AI Response:\n{response}\n")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    provider_choice = input("Use 'openai', 'gemini', 'byteplus', or 'remote'? ").strip().lower()
+    llm = LLMInterface(provider=provider_choice)
+    llm._cli()
