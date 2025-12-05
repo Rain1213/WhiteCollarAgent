@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from asyncio import Queue, QueueEmpty
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Awaitable, Callable, Tuple
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -190,6 +190,14 @@ class _CraftApp(App):
         self.set_interval(0.1, self._flush_pending_updates)
         self.set_interval(0.2, self._tick_status_marquee)
 
+    def clear_logs(self) -> None:
+        """Clear chat and action logs from the display."""
+
+        chat_log = self.query_one("#chat-log", _ConversationLog)
+        action_log = self.query_one("#action-log", _ConversationLog)
+        chat_log.clear()
+        action_log.clear()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         message = event.value.strip()
         event.input.value = ""
@@ -313,9 +321,42 @@ class TUIInterface:
         self._app: _CraftApp | None = None
         self._event_task: asyncio.Task[None] | None = None
 
+        self._command_handlers: dict[str, Callable[[], Awaitable[None]]] = {}
+
         self.chat_updates: Queue[TimelineEntry] = Queue()
         self.action_updates: Queue[_ActionEntry] = Queue()
         self.status_updates: Queue[str] = Queue()
+
+        self._register_commands()
+
+    def _register_commands(self) -> None:
+        self._command_handlers = {
+            "/exit": self._handle_exit_command,
+            "/clear": self._handle_clear_command,
+            "/reset": self._handle_reset_command,
+        }
+
+    async def _maybe_handle_command(self, message: str) -> bool:
+        command = message.split()[0].lower()
+
+        handler = self._command_handlers.get(command)
+        if handler:
+            await handler()
+            return True
+
+        agent_command = self._agent.get_commands().get(command)
+        if agent_command:
+            result = await agent_command.handler()
+            await self.chat_updates.put(
+                (
+                    "System",
+                    result or f"Command '{command}' executed.",
+                    "system",
+                )
+            )
+            return True
+
+        return False
 
     async def start(self) -> None:
         """Start the Textual TUI session and background consumers."""
@@ -326,7 +367,11 @@ class TUIInterface:
         logger.debug("Starting Textual TUI interface. Press Ctrl+C to exit.")
 
         await self.chat_updates.put(
-            ("System", "White Collar Agent TUI ready. Type '/exit' to finish.", "system")
+            (
+                "System",
+                "White Collar Agent TUI ready. Commands: /exit, /reset, /clear.",
+                "system",
+            )
         )
         await self.status_updates.put(self._status_message)
 
@@ -359,11 +404,7 @@ class TUIInterface:
         if not message:
             return
 
-        lowered = message.lower()
-        if lowered in {"/exit"}:
-            await self.chat_updates.put(("System", "Session terminated by user.", "system"))
-            await self.status_updates.put("Idle")
-            await self.request_shutdown()
+        if await self._maybe_handle_command(message):
             return
 
         await self.chat_updates.put(("You", message, "user"))
@@ -386,6 +427,48 @@ class TUIInterface:
 
         if self._app and self._app.is_running:
             self._app.exit()
+
+    async def _handle_exit_command(self) -> None:
+        await self.chat_updates.put(("System", "Session terminated by user.", "system"))
+        await self.status_updates.put("Idle")
+        await self.request_shutdown()
+
+    def _clear_display_logs(self) -> None:
+        if self._app:
+            self._app.clear_logs()
+
+    async def _handle_clear_command(self) -> None:
+        self._clear_display_logs()
+        self.chat_updates = Queue()
+        self.action_updates = Queue()
+        await self.chat_updates.put(
+            ("System", "Cleared chat and action timelines.", "system")
+        )
+
+    async def _handle_reset_command(self) -> None:
+        response: str | None = None
+        reset_command = self._agent.get_commands().get("/reset")
+        if reset_command:
+            response = await reset_command.handler()
+
+        await self._reset_interface_state()
+        await self.chat_updates.put(
+            (
+                "System",
+                response or "Agent reset. Starting fresh.",
+                "system",
+            )
+        )
+
+    async def _reset_interface_state(self) -> None:
+        self._tracked_sessions.clear()
+        self._seen_events.clear()
+        self.chat_updates = Queue()
+        self.action_updates = Queue()
+        self.status_updates = Queue()
+        self._status_message = "Idle"
+        self._clear_display_logs()
+        await self.status_updates.put(self._status_message)
 
     async def _consume_triggers(self) -> None:
         """Continuously consume triggers and hand them to the agent."""
