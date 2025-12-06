@@ -50,6 +50,16 @@ class _ConversationLog(_BaseLog):
         # Write using expand/shrink so width follows the widget on resize
         self.write(renderable, expand=True, shrink=True)
 
+    def on_resize(self, event: events.Resize) -> None:  # pragma: no cover - UI layout
+        """Force a reflow when the widget width changes.
+
+        Without this, RichLog may retain the old line breaks, causing text to
+        overflow or leave unused space until new content is added.
+        """
+
+        super().on_resize(event)
+        self.refresh(layout=True, repaint=True)
+
 
 TimelineEntry = Tuple[str, str, str]
 
@@ -76,6 +86,7 @@ class _CraftApp(App):
     /* Shared chrome */
     #top-region {
         height: 1fr;
+        min-width: 0;
     }
 
     #chat-panel, #action-panel {
@@ -83,12 +94,14 @@ class _CraftApp(App):
         border: solid #444444;
         border-title-align: left;
         margin: 0 1;
+        min-width: 0;  /* allow panels to shrink with the terminal */
     }
 
     #chat-log, #action-log {
         text-wrap: wrap;
         text-overflow: fold;
         overflow-x: hidden;
+        min-width: 0;  /* enable reflow instead of clamped min-content width */
     }
 
     #chat-panel {
