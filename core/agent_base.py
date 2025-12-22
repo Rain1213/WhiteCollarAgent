@@ -495,16 +495,6 @@ class AgentBase:
 
     # ────────────────────────── internals ────────────────────────────────
 
-    def _compose_prompt(self, user_query: str):
-        """
-        Helper that merges *extra_system_prompt* (if any) with the normal
-        prompt created by ContextEngine.
-        """
-        sys_msg, usr_msg = self.context_engine.make_prompt(user_query)
-        if self._extra_system_prompt:
-            sys_msg = f"{self._extra_system_prompt.strip()}\n\n{sys_msg}"
-        return sys_msg, usr_msg
-
     async def reset_agent_state(self) -> str:
         """Reset runtime state so the agent behaves like a fresh instance."""
 
