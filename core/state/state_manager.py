@@ -1,139 +1,13 @@
-# -*- coding: utf-8 -*-
-"""State management utilities for single-user, single-session agents."""
-
 import json
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, TypedDict
-
-import mss
-import mss.tools
-
+from typing import Dict, List, Literal, Optional
+from core.state.types import AgentProperties, ConversationMessage
+from core.state.state_session import StateSession
 from core.event_stream.event_stream_manager import EventStreamManager
 from core.logger import logger
 
-
-class ConversationMessage(TypedDict):
-    role: Literal["user", "agent"]
-    content: str
-    timestamp: str
-
-class StateSession:
-    """Singleton-like container for the *current* agent session state."""
-
-    _instance = None
-
-    def __init__(self):
-        self.session_id: str | None = "default"
-        self.conversation_state: str | None = None
-        self.current_task: str | None = None
-        self.event_stream: str | None = None
-        self.gui_mode: bool = False
-
-    @classmethod
-    def start(
-        cls,
-        *,
-        session_id: str,
-        conversation_state: str | None,
-        current_task: str | None,
-        event_stream: str | None,
-        gui_mode: bool,
-    ) -> None:
-        """
-        Initialise a new in-memory session container for the active user.
-
-        Session are created per task and it stores the initial conversation, 
-        task, and event stream snapshots so downstream components (LLMs, UIs, tools)
-        can read a consistent baseline state. The singleton instance is 
-        replaced on every call, meaning this resets any previously 
-        active session context.
-
-        Args:
-            session_id: Unique identifier for the task that owns the state.
-            conversation_state: snapshot of conversation.
-            current_task: JSON-serialised task state for the workflow currently being executed.
-            event_stream: Event stream buffer that records events happen in task so far.
-            gui_mode: Flag indicating whether the agent is running in GUI mode.
-        """
-
-        cls._instance = cls()
-        inst = cls._instance
-        
-        # Normalise session identifiers that may arrive quoted from upstream
-        # payloads (e.g. JSON-encoded task ids). Quoted IDs fail lookups in
-        # TaskManager.active, leading to spurious "task_not_found" errors when
-        # running follow-up actions such as start_next_step.
-        # Need a better method in the future.
-        if isinstance(session_id, str):
-            session_id = session_id.strip().strip('"')
-        
-        inst.session_id = session_id
-        inst.conversation_state = conversation_state
-        inst.current_task = current_task
-        inst.event_stream = event_stream
-        inst.gui_mode = gui_mode
-
-    @classmethod
-    def get(cls):
-        """
-        Access the current session object. Raises RuntimeError if no session is started.
-        """
-        if cls._instance is None:
-            raise RuntimeError("State Session not started.")
-        return cls._instance
-
-    @classmethod
-    def get_or_none(cls):
-        """
-        Retrieve the current session container if it exists.
-
-        Returns:
-            StateSession | None: The current session, or ``None`` when no
-            session has been started.
-        """
-        return cls._instance
-
-    @classmethod
-    def end(cls):
-        """
-        Clear the active session reference.
-
-        Downstream calls to :meth:`get` will raise ``RuntimeError`` until
-        :meth:`start` is invoked again. No persistent state is modified.
-        """
-        cls._instance = None
-
-    """
-    Call update when state changes to reflect on the latest state.
-    Otherwise the session does not get updated with latest state.
-    """
-    def update_conversation_state(self, new_state: str) -> None:
-        self.conversation_state = new_state
-
-    def update_current_task(self, new_task: str | None) -> None:
-        self.current_task = new_task
-
-    def update_event_stream(self, new_event_stream: str | None) -> None:
-        self.event_stream = new_event_stream
-
-    def update_gui_mode(self, gui_mode: bool) -> None:
-        self.gui_mode = gui_mode
-
-    def refresh(
-        self,
-        *,
-        conversation_state: str | None = None,
-        current_task: str | None = None,
-        event_stream: str | None = None,
-    ) -> None:
-        """Convenience wrapper – pass only what changed."""
-        if conversation_state is not None:
-            self.conversation_state = conversation_state
-        if current_task is not None:
-            self.current_task = current_task
-        if event_stream is not None:
-            self.event_stream = event_stream
-
+import mss
+import mss.tools
 
 class StateManager:
     """Manages conversation snapshots, task state, and runtime session data."""
@@ -155,7 +29,7 @@ class StateManager:
         # e.g. current conversation, conversation state, action state
         self.tasks: Dict[str, dict] = {}
         self.event_stream_manager = event_stream_manager
-        self.agent_properties = {}
+        self.agent_properties: AgentProperties = AgentProperties(current_task_id="", action_count=0)
         self.vlm_interface = vlm_interface
         self._conversation: List[ConversationMessage] = []
 
@@ -221,7 +95,7 @@ class StateManager:
         agent to a clean boot state.
         """
         self.tasks.clear()
-        self.agent_properties = {}
+        self.agent_properties: AgentProperties = AgentProperties(current_task_id="", action_count=0)
         self.clear_conversation_history()
         if self.event_stream_manager:
             self.event_stream_manager.clear_all()
@@ -517,10 +391,16 @@ class StateManager:
         """
         Sets a global agent property (not specific to any task).
         """
-        self.agent_properties[key] = value
+        self.agent_properties.set_property(key, value)
 
     def get_agent_property(self, key, default=None):
         """
         Retrieves a global agent property.
         """
-        return self.agent_properties.get(key, default)
+        return self.agent_properties.get_property(key, default)
+
+    def get_agent_properties(self):
+        """
+        Retrieves all global agent properties.
+        """
+        return self.agent_properties.to_dict()
