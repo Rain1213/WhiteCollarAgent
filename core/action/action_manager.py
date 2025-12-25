@@ -127,7 +127,6 @@ class ActionManager:
         
         if is_running_task and self.event_stream_manager:
             self.event_stream_manager.log(
-                session_id,
                 "action",
                 f"Running action {action.name} with input: {input_data}.",
                 display_message=f"Running {action.name}",
@@ -209,7 +208,6 @@ class ActionManager:
         if is_running_task and self.event_stream_manager:
             display_status = "failed" if status == "error" else "completed"
             self.event_stream_manager.log(
-                session_id,
                 "action",
                 f"Action {action.name} completed with output: {outputs}.",
                 display_message=f"{action.name} → {display_status}",
@@ -220,7 +218,6 @@ class ActionManager:
             current_step = self.state_manager.get_current_step(session_id)
             if current_step:
                 self.event_stream_manager.log(
-                    session_id, 
                     "task", 
                     f"Running task step: '{current_step.get('step_name')}' – {current_step.get('description')}",
                     display_message=f"Running task step: '{current_step.get('step_name')}' – {current_step.get('description')}"

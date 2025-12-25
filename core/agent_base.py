@@ -221,13 +221,12 @@ class AgentBase:
 
                 if self.event_stream_manager:
                     self.event_stream_manager.log(
-                        session_id,
                         "screen",
                         screen_md,
                         display_message="Screen summary updated",
                     )
 
-                AgentBase.get_state_manager().bump_event_stream(session_id)
+                AgentBase.get_state_manager().bump_event_stream()
 
             # ===================================
             # 3. Check Limits
@@ -308,7 +307,7 @@ class AgentBase:
             # ===================================
             new_session_id = action_output.get("task_id") or session_id
 
-            AgentBase.get_state_manager().bump_event_stream(new_session_id)
+            AgentBase.get_state_manager().bump_event_stream()
 
             # Schedule next trigger if continuing a task
             await self._create_new_trigger(new_session_id, action_output, STATE)
@@ -324,7 +323,6 @@ class AgentBase:
                     logger.debug("[REACT ERROR] logging to event stream")
 
                     self.event_stream_manager.log(
-                        session_to_use,
                         "error",
                         f"[REACT] {type(e).__name__}: {e}\n{tb}",
                         display_message=None,
@@ -332,7 +330,7 @@ class AgentBase:
 
                     logger.debug("[AGENT BASE] Action failed")
 
-                    AgentBase.get_state_manager().bump_event_stream(session_to_use)
+                    AgentBase.get_state_manager().bump_event_stream()
 
                     logger.debug("[AGENT BASE] Action failed and then bumped")
                     logger.debug(f"[AGENT BASE] Action Output: {action_output}")
@@ -367,24 +365,22 @@ class AgentBase:
             task_cancelled: bool = True if response.get('status') == "ok" else Fakse
             if self.event_stream_manager and task_cancelled:
                 self.event_stream_manager.log(
-                    session_id,
                     "warning",
                     f"[Warning] Action limit reached: 100% of the maximum ({max_actions} actions) has been used. Aborting task.",
                     display_message=f"Action limit reached: 100% of the maximum ({max_actions} actions) has been used. Aborting task.",
                 )
-                AgentBase.get_state_manager().bump_event_stream(session_id)
+                AgentBase.get_state_manager().bump_event_stream()
             return not task_cancelled
         elif (action_count / max_actions) >= 0.8:
             if self.event_stream_manager:
                 self.event_stream_manager.log(
-                    session_id,
                     "warning",
                     f"[Warning] Action limit nearing: 80% of the maximum ({max_actions} actions) has been used. "
                     "Consider wrapping up the task or informing the user that the task may be too complex. "
                     "If necessary, mark the task as aborted to prevent premature termination.",
                     display_message=None,
                 )
-                AgentBase.get_state_manager().bump_event_stream(session_id)
+                AgentBase.get_state_manager().bump_event_stream()
                 return True
 
         # Check token limits
@@ -393,24 +389,22 @@ class AgentBase:
             task_cancelled: bool = True if response.get('status') == "ok" else Fakse
             if self.event_stream_manager and task_cancelled:
                 self.event_stream_manager.log(
-                    session_id,
                     "warning",
                     f"[Warning] Token limit reached: 100% of the maximum ({max_tokens} tokens) has been used. Aborting task.",
                     display_message=f"Action limit reached: 100% of the maximum ({max_tokens} tokens) has been used. Aborting task.",
                 )
-                AgentBase.get_state_manager().bump_event_stream(session_id)
+                AgentBase.get_state_manager().bump_event_stream()
             return not task_cancelled
         elif (token_count / max_tokens) >= 0.8:
             if self.event_stream_manager:
                 self.event_stream_manager.log(
-                    session_id,
                     "warning",
                     f"[Warning] Token limit nearing: 80% of the maximum ({max_tokens} tokens) has been used. "
                     "Consider wrapping up the task or informing the user that the task may be too complex. "
                     "If necessary, mark the task as aborted to prevent premature termination.",
                     display_message=None,
                 )
-                AgentBase.get_state_manager().bump_event_stream(session_id)
+                AgentBase.get_state_manager().bump_event_stream()
                 return True
         
         # No limits close or reached

@@ -88,12 +88,10 @@ class TaskManager:
         self._sync_state_manager(wf)
         logger.debug(f"[TaskManager] Task {task_id} with {len(steps)} steps created")
 
-        if self.event_stream_manager.get_stream(task_id) is None:
-            self.event_stream_manager.create_stream(task_id, temp_dir=temp_dir)
+        self.event_stream_manager.event_stream.temp_dir=temp_dir
 
         logger.debug("LOGGGING TO EVENT STREAM")
         self.event_stream_manager.log(
-            task_id,
             "task",
             f"Created task: '{task_name}' with instruction: '{task_instruction}'.",
             display_message=f"Task created → {task_name}",
@@ -174,7 +172,6 @@ class TaskManager:
             if not new_current_step.action_id:
                 new_current_step.action_id = str(uuid.uuid4())
             self.event_stream_manager.log(
-                task_id,
                 "task",
                 f"Running new step: '{new_current_step.step_name}' – {new_current_step.description}",
                 display_message=f"Running new step: '{new_current_step.step_name}' – {new_current_step.description}",
@@ -207,7 +204,6 @@ class TaskManager:
         )
 
         self.event_stream_manager.log(
-            task_id, 
             "task", 
             f"Running task step: '{step.step_name}' – {step.description}",
             display_message=f"Running task step: '{step.step_name}' – {step.description}"
@@ -391,7 +387,6 @@ class TaskManager:
         self.db_interface.log_task(wf)
         self._sync_state_manager(wf)
         self.event_stream_manager.log(
-            wf.id,
             "task",
             f"Task ended with status '{status}'. {note or ''}",
             display_message=f"Task {wf.name} → {status}",

@@ -9,7 +9,7 @@ from core.state.types import AgentProperties
 class AgentState:
     """Authoritative runtime state for the agent."""
 
-    session_id; Optional[str] None
+    session_id: Optional[str] = None
     conversation_state: Optional[str] = None
     current_task: Optional[str] = None
     event_stream: Optional[str] = None

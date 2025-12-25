@@ -39,14 +39,12 @@ class EventStream:
     def __init__(
         self,
         *,
-        session_id: str,
         llm: LLMInterface,
         summarize_at: int = 30,
         tail_keep_after_summarize: int = 15,
         max_events: int = 60,
         temp_dir: Path | None = None,
     ) -> None:
-        self.session_id = session_id
         self.head_summary: Optional[str] = None
         self.llm = llm
         self.tail_events: List[EventRecord] = []
@@ -200,7 +198,7 @@ class EventStream:
         previous_summary = self.head_summary or "(none)"
 
         # Build a focused prompt for durable, operation-oriented summarization
-        prompt = EVENT_STREAM_SUMMARIZATION_PROMPT(self.session_id, window, previous_summary, compact_lines)
+        prompt = EVENT_STREAM_SUMMARIZATION_PROMPT(window, previous_summary, compact_lines)
 
         # Ask the LLM to synthesize the new head summary
         try:

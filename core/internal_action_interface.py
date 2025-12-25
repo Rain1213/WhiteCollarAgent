@@ -92,15 +92,12 @@ class InternalActionInterface:
         if STATE and STATE.session_id:
             session_id = STATE.session_id
             event_stream_manager = InternalActionInterface.state_manager.event_stream_manager
-            if event_stream_manager.get_stream(session_id) is None:
-                event_stream_manager.create_stream(session_id)
             event_stream_manager.log(
-                session_id,
                 "agent",
                 message,
                 display_message=message
             )
-            InternalActionInterface.state_manager.bump_event_stream(session_id)
+            InternalActionInterface.state_manager.bump_event_stream()
 
     @staticmethod
     def do_ignore():
@@ -116,15 +113,12 @@ class InternalActionInterface:
         if STATE and STATE.session_id:
             session_id = STATE.session_id
             event_stream_manager = InternalActionInterface.state_manager.event_stream_manager
-            if event_stream_manager.get_stream(session_id) is None:
-                event_stream_manager.create_stream(session_id)
             event_stream_manager.log(
-                session_id,
                 "agent_question",
                 question,
                 display_message=question
             )
-            InternalActionInterface.state_manager.bump_event_stream(session_id)
+            InternalActionInterface.state_manager.bump_event_stream()
 
     # ───────────────── CLI and GUI mode ─────────────────
     @staticmethod

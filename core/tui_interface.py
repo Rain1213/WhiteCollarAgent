@@ -1004,7 +1004,7 @@ class TUIInterface:
         try:
             while self._running and self._agent.is_running:
                 for session_id in list(self._tracked_sessions):
-                    stream = self._agent.event_stream_manager.get_stream(session_id)
+                    stream = self._agent.event_stream_manager.get_stream()
                     if not stream:
                         continue
                     for event in stream.as_list():

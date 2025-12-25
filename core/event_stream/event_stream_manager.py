@@ -18,37 +18,23 @@ from core.logger import logger
 class EventStreamManager:
     def __init__(self, llm: LLMInterface) -> None:
         # active event streams, keyed by session_id (string)
-        self.active: Dict[str, EventStream] = {}
+        self.event_stream: EventStream = EventStream(llm=llm, temp_dir=None)
         self.llm = llm
 
     # ───────────────────────────── lifecycle ─────────────────────────────
 
-    def create_stream(self, session_id: str, *, temp_dir: Path | None = None) -> EventStream:
-        """
-        Create a new event stream for a given session_id.
-        If it already exists, overwrite with a fresh one.
-        """
-        stream = EventStream(session_id=session_id, llm=self.llm, temp_dir=temp_dir)
-        self.active[session_id] = stream
-        return stream
-
-    def get_stream(self, session_id: str) -> Optional[EventStream]:
+    def get_stream(self) -> EventStream:
         """Return the event stream for this session, or None if missing."""
-        return self.active.get(session_id)
-
-    def remove_stream(self, session_id: str) -> None:
-        """Remove and discard a stream."""
-        self.active.pop(session_id, None)
+        return self.event_stream
 
     def clear_all(self) -> None:
         """Remove all event streams."""
-        self.active.clear()
+        self.event_stream.clear()
 
     # ───────────────────────────── utilities ─────────────────────────────
 
     def log(
         self,
-        session_id: str,
         kind: str,
         message: str,
         severity: str = "INFO",
@@ -61,12 +47,8 @@ class EventStreamManager:
         Creates the stream if it does not exist.
         Returns the index of the logged event.
         """
-        logger.debug(f"Process Started - Logging event to stream {session_id}: [{severity}] {kind} - {message}")
-        stream = self.get_stream(session_id)
-        if not stream:
-            logger.debug(f"No existing stream for {session_id}. Creating new stream.")
-            stream = self.create_stream(session_id)
-            logger.debug(f"Created new stream: {stream}")
+        logger.debug(f"Process Started - Logging event to stream: [{severity}] {kind} - {message}")
+        stream = self.get_stream()
         return stream.log(
             kind,
             message,
@@ -75,16 +57,9 @@ class EventStreamManager:
             action_name=action_name,
         )
 
-    def snapshot(self, session_id: str, max_events: int = 60, include_summary: bool = True) -> str:
+    def snapshot(self, max_events: int = 60, include_summary: bool = True) -> str:
         """Return a prompt snapshot of a specific session, or '(no events)' if not found."""
-        stream = self.get_stream(session_id)
+        stream = self.get_stream()
         if not stream:
             return "(no events)"
         return stream.to_prompt_snapshot(max_events=max_events, include_summary=include_summary)
-
-    def snapshot_all(self, max_events: int = 30) -> Dict[str, str]:
-        """
-        Return prompt snapshots for all active streams.
-        Useful for debugging or dashboarding.
-        """
-        return {sid: s.to_prompt_snapshot(max_events=max_events) for sid, s in self.active.items()}

@@ -31,10 +31,10 @@ class StateManager:
 
         logger.debug(f"[CURRENT TASK]: this is the current_task: {current_task}")
 
-        event_stream = self.get_event_stream_snapshot(session_id)
+        event_stream = self.get_event_stream_snapshot()
 
         STATE.refresh(
-            session_id=session_id
+            session_id=session_id,
             conversation_state=conversation_state,
             current_task=current_task,
             event_stream=event_stream,
@@ -110,8 +110,8 @@ class StateManager:
                 return st
         return None
     
-    def get_event_stream_snapshot(self, session_id: str, *, max_events: int = 60) -> str:
-        return self.event_stream_manager.snapshot(session_id, max_events=max_events)
+    def get_event_stream_snapshot(self, *, max_events: int = 60) -> str:
+        return self.event_stream_manager.snapshot(max_events=max_events)
         
     def get_current_task_state(self, session_id: str) -> Optional[str]:
         wf = self.tasks.get(session_id)
@@ -153,8 +153,8 @@ class StateManager:
                 self.get_current_task_state(session_id)
             )
             
-    def bump_event_stream(self, session_id: str) -> None:
-        STATE.update_event_stream(self.get_event_stream_snapshot(session_id))
+    def bump_event_stream(self) -> None:
+        STATE.update_event_stream(self.get_event_stream_snapshot())
             
     async def bump_conversation_state(self) -> None:
         STATE.update_conversation_state(await self.get_conversation_state())
