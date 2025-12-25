@@ -126,7 +126,7 @@ class AgentBase:
         self.context_engine.set_role_info_hook(self._generate_role_info_prompt)
 
         self.action_manager = ActionManager(
-            self.action_library, self.llm, self.db_interface, self.event_stream_manager, self.context_engine, AgentBase.get_state_manager()
+            self.action_library, self.llm, self.db_interface, self.event_stream_manager, self.context_engine, self.state_manager
         )
         self.action_router = ActionRouter(self.action_library, self.llm, self.context_engine)
 
@@ -136,13 +136,13 @@ class AgentBase:
             self.triggers,
             db_interface=self.db_interface,
             event_stream_manager=self.event_stream_manager,
-            state_manager=AgentBase.get_state_manager(),
+            state_manager=self.state_manager,
         )
 
         InternalActionInterface.initialize(
             self.llm,
             self.task_manager,
-            AgentBase.get_state_manager(),
+            self.state_manager,
             vlm_interface=self.vlm,
         )
 
@@ -258,7 +258,7 @@ class AgentBase:
             # 4. Select Action
             # ===================================
             logger.debug("[REACT] selecting action")
-            is_running_task: bool = AgentBase.get_state_manager().is_running_task()
+            is_running_task: bool = self.state_manager.is_running_task()
 
             if is_running_task:
                 # Perform reasoning to guide action selection within the task
@@ -496,7 +496,7 @@ class AgentBase:
                 propagate session context and payload.
         """
         try:
-            if not AgentBase.get_state_manager().is_running_task():
+            if not self.state_manager.is_running_task():
                 # Nothing to schedule if no task is running
                 return
 
@@ -552,7 +552,7 @@ class AgentBase:
             gui_mode = payload.get("gui_mode")
             await self.state_manager.start_session(gui_mode)
 
-            AgentBase.get_state_manager().record_user_message(chat_content)
+            self.state_manager.record_user_message(chat_content)
 
             await self.triggers.put(
                 Trigger(
@@ -617,7 +617,7 @@ class AgentBase:
 
         await self.triggers.clear()
         self.task_manager.reset()
-        AgentBase.get_state_manager().reset()
+        self.state_manager.reset()
         self.event_stream_manager.clear_all()
 
         return "Agent state reset. Starting fresh." 
