@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from core.action.action import Action
+from core.logger import logger
 
 # ============================================
 # Global process pool (shared safely)
@@ -141,6 +142,7 @@ class ActionExecutor:
                     ),
                     timeout=timeout + 5,
                 )
+                logger.info(f"[SANDBOX RESULT]: {result}")
             except asyncio.TimeoutError:
                 return {
                     "error": f"Execution timed out after {timeout}s while running sandboxed action.",
@@ -151,6 +153,7 @@ class ActionExecutor:
             raise ValueError(f"Unknown execution_mode: {execution_mode}")
 
         # ─── Normalize result ───
+        
         if result["stderr"]:
             return {
                 "error": result["stderr"],
