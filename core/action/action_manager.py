@@ -324,12 +324,8 @@ class ActionManager:
                 logger.error(f"Action execution error: {output['error']}")
                 return output  # DO NOT parse
 
-            # Otherwise, parse the raw stdout
-            raw_stdout = output.get("raw_stdout", "")
-            parsed_output = self._parse_action_output(raw_stdout)
-
-            logger.debug(f"[ACTION] Parsed action output: {parsed_output}")
-            return parsed_output
+            logger.debug(f"[ACTION] Parsed action output: {output}")
+            return output
 
         except Exception as e:
             logger.exception("Error occurred while executing atomic action")
