@@ -7,11 +7,11 @@ import venv
 import uuid
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict
 
-from core.action.action import Action
-from core.logger import logger
+# Assuming Action is defined elsewhere or imported
+# from core.action.action import Action 
+# from core.logger import logger
 
 # ============================================
 # Global process pool (shared safely)
@@ -33,7 +33,6 @@ def _atomic_action_venv_process(
     Executes an action inside an ephemeral virtual environment.
     Runs in a SEPARATE PROCESS.
     """
-
     try:
         with tempfile.TemporaryDirectory(prefix="action_venv_") as tmpdir:
             tmp = Path(tmpdir)
@@ -49,6 +48,7 @@ def _atomic_action_venv_process(
             )
 
             # ─── Write action script ───
+            # We inject input_data as a global so the action code can access it
             action_file = tmp / "action.py"
             action_file.write_text(
                 f"""
@@ -76,7 +76,6 @@ input_data = json.loads({json.dumps(json.dumps(input_data))})
 
     except subprocess.TimeoutExpired:
         return {"stdout": "", "stderr": "Execution timed out", "returncode": -1}
-
     except Exception as e:
         return {"stdout": "", "stderr": f"Execution failed: {e}", "returncode": -1}
 
@@ -86,13 +85,13 @@ def _atomic_action_internal(
 ) -> dict:
     """
     Executes an internal action in-process.
-    Has access to core.*, state, internals.
     """
-
     try:
         import json
         local_ns = {
             "input_data": input_data,
+            "json": json,
+            "asyncio": asyncio,
         }
 
         # Execute the function definition
@@ -151,7 +150,7 @@ class ActionExecutor:
 
     async def execute_atomic_action(
         self,
-        action: Action,
+        action: Any, # Usually 'Action'
         input_data: dict,
         *,
         timeout: int = 1800,
@@ -175,38 +174,63 @@ class ActionExecutor:
                     ),
                     timeout=timeout + 5,
                 )
-                logger.info(f"[SANDBOX RESULT]: {result}")
             except asyncio.TimeoutError:
                 return {
                     "error": f"Execution timed out after {timeout}s while running sandboxed action.",
-                    "raw_stdout": "",
+                    "status": "error"
                 }
-
         else:
             raise ValueError(f"Unknown execution_mode: {execution_mode}")
 
-        # ─── Normalize result ───
-        
-        if result["stderr"]:
+        # ─── Parse and Normalize Result ───
+
+        # 1. Handle hardware/process level errors
+        if result.get("returncode", 0) != 0:
             return {
-                "error": result["stderr"],
+                "error": result.get("stderr") or "Unknown execution error",
                 "raw_stdout": result.get("stdout", ""),
-                "raw_stderr": result.get("stderr", ""), # TODO remove this after testing
+                "status": "error"
             }
-        return {
-            "raw_stdout": result.get("stdout", ""),
-        }
+
+        raw_output = result.get("stdout", "").strip()
+
+        # 2. Attempt to parse the stdout as JSON
+        if raw_output:
+            try:
+                # Both internal and sandboxed actions are designed to return JSON strings
+                parsed_data = json.loads(raw_output)
+                
+                # If the parsed data is already a dict, return it directly
+                if isinstance(parsed_data, dict):
+                    return parsed_data
+                
+                # If it's a valid JSON but not a dict (like a string/bool), wrap it
+                return {"raw_stdout": parsed_data, "status": "success"}
+                
+            except json.JSONDecodeError:
+                # Fallback if the script output text that wasn't JSON
+                return {
+                    "raw_stdout": raw_output,
+                    "error": "Output was not valid JSON",
+                    "status": "partial_success"
+                }
+        
+        # 3. Handle empty output
+        if result.get("stderr"):
+            return {"error": result["stderr"], "status": "error"}
+            
+        return {"status": "success", "message": "Action completed with no output."}
 
     async def execute_action(
         self,
-        action: Action,
+        action: Any,
         input_data: dict,
     ) -> dict:
         run_id = str(uuid.uuid4())
         self._inflight[run_id] = action
 
         try:
-            if action.action_type != "atomic":
+            if getattr(action, "action_type", "atomic") != "atomic":
                 raise ValueError("Only atomic actions supported")
 
             return await self.execute_atomic_action(action, input_data)
