@@ -106,8 +106,8 @@ class StateManager:
                 return st
         return None
     
-    def get_event_stream_snapshot(self, *, max_events: int = 60) -> str:
-        return self.event_stream_manager.snapshot(max_events=max_events)
+    def get_event_stream_snapshot(self) -> str:
+        return self.event_stream_manager.snapshot()
         
     def get_current_task_state(self) -> Optional[str]:
         wf = self.task

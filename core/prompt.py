@@ -289,25 +289,22 @@ You are given:
   • key entities (files/URLs/IDs/emails/app names) that may be referenced later
   • meaningful metrics/counters if they affect decisions
 - Remove noise, duplicates, transient progress messages, or low-value chatter.
-- Prefer concise bullets; keep it readable and compact (aim ~150–250 words).
+- Prefer concise bullets; keep it readable and compact (aim ~250–350 words).
 - Do NOT include the recent (unsummarized) tail; we only rewrite the head summary.
 </rules>
 
 <output_format>
-Output ONLY the NEW_HEAD_SUMMARY as plain text (no JSON, no preface).
+Output ONLY the NEW_HEAD_SUMMARY as plain text in paragraph (no JSON, no preface, no list).
 </output_format>
 
 <previous_head_summary>
-
 {previous_summary}
-
 </previous_head_summary>
 
 <events>
 OLDEST_EVENTS_CHUNK (compact lines):
 
 {compact_lines}
-
 <events>
 """
 
