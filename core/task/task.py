@@ -85,8 +85,8 @@ class Task:
             "id": self.id,
             "name": self.name,
             "instruction": self.instruction,
-            "steps": [step.to_dict(fold=fold, current_step_index=current_step_index) for step in self.steps],
             "goal": self.goal,
             "inputs_params": self.inputs_params,
             "context": self.context,
+            "steps": [step.to_dict(fold=fold, current_step_index=current_step_index) for step in self.steps],
         }
