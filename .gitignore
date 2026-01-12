@@ -16,3 +16,4 @@ node_modules
 .env
 **/agent_logs.txt
 **/memory.txt
+notes.md
