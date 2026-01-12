@@ -88,11 +88,22 @@ conda env create -f environment.yml
 
 ## ⚡ Quick Start
 
+Choose an LLM Provider:
+```bash
+export LLM_PROVIDER="openai"
+or
+export LLM_PROVIDER="gemini"
+or
+export LLM_PROVIDER="byteplus"
+```
+
 Export your API key:
 ```bash
 export OPENAI_API_KEY=<YOUR_KEY_HERE>
 or
 export GOOGLE_API_KEY=<YOUR_KEY_HERE>
+or
+export BYTEPLUS_API_KEY=<YOUR_KEY_HERE>
 ```
 
 Run the CLI tool:
